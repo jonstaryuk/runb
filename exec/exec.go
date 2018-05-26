@@ -163,7 +163,9 @@ type Launched struct {
 	Process *os.Process
 }
 
-func (Launched) String() string { return "launched" }
+func (l Launched) String() string {
+	return fmt.Sprintf("launched pid %d", l.Process.Pid)
+}
 
 type LaunchFailed struct {
 	Err error
