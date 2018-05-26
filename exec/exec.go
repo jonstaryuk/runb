@@ -91,7 +91,7 @@ func (t *Task) Run(ctx context.Context) error {
 		t.cmd = t.newCmd()
 
 		if err := t.cmd.Start(); err != nil {
-			t.Log(LaunchFailed{error: err})
+			t.Log(LaunchFailed{Err: err})
 			return errors.Wrap(err, "start process")
 		}
 		start = time.Now()
@@ -166,10 +166,10 @@ type Launched struct {
 func (Launched) String() string { return "launched" }
 
 type LaunchFailed struct {
-	error
+	Err error
 }
 
-func (l LaunchFailed) String() string { return l.Error() }
+func (l LaunchFailed) String() string { return l.Err.Error() }
 
 type Exited struct {
 	Err     error
