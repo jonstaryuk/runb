@@ -132,3 +132,20 @@ func TestEnv(t *testing.T) {
 	assert.Equal(t, "foo=bar\n", stdout.String())
 	assert.Empty(t, stderr.String())
 }
+
+func TestAlreadyRunning(t *testing.T) {
+	t.Parallel()
+
+	task := newTask(t, 1500*ms, "sleep", "1")
+
+	go func() {
+		err := task.Run(task.ctx, 0)
+		assert.NoError(t, err)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	err := task.Run(task.ctx, 0)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "already running")
+	}
+}
