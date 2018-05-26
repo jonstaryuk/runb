@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -134,19 +135,20 @@ func TestEnv(t *testing.T) {
 	assert.Empty(t, stderr.String())
 }
 
-func TestAlreadyRunning(t *testing.T) {
+func TestConcurrentRuns(t *testing.T) {
 	t.Parallel()
 
 	task := newTask(t, 1500*ms, "sleep", "1")
-
-	go func() {
-		err := task.Run(task.ctx)
-		assert.NoError(t, err)
-	}()
-
-	time.Sleep(100 * time.Millisecond)
-	err := task.Run(task.ctx)
-	if assert.Error(t, err) {
-		assert.Contains(t, err.Error(), "already running")
+	wg := sync.WaitGroup{}
+	n := 10
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			err := task.Run(task.ctx)
+			assert.NoError(t, err)
+			wg.Done()
+		}()
 	}
+
+	wg.Wait()
 }
