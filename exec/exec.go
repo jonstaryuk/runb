@@ -34,7 +34,7 @@ type Task struct {
 	// How long to wait after sending an interrupt, before killing the process.
 	StopGracePeriod time.Duration
 
-	EventLogger // Defaults to a new StderrEventLogger
+	EventLogger // Defaults to a NoopLogger
 }
 
 // NewTask creates a new Task with default values.
@@ -55,7 +55,7 @@ func NewTask(binary string, args ...string) *Task {
 	}
 
 	if t.EventLogger == nil {
-		t.EventLogger = StderrEventLogger{Prefix: t.Binary}
+		t.EventLogger = NoopLogger{}
 	}
 
 	if t.Backoff == nil {
