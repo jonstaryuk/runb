@@ -46,7 +46,7 @@ func in(d time.Duration, f func()) {
 func TestAdmitNormal(t *testing.T) {
 	task := newTask(t, 100*ms, "date")
 
-	err := task.Run(task.ctx, 0)
+	err := task.Run(task.ctx)
 	assert.NoError(t, err)
 
 	assert.Len(t, task.events, 2)
@@ -64,7 +64,7 @@ func TestAdmitFailure(t *testing.T) {
 	task.Stderr = stderr
 	task.Backoff = backoff.WithMaxRetries(task.Backoff, 1)
 
-	err := task.Run(task.ctx, 0)
+	err := task.Run(task.ctx)
 	assert.NotNil(t, err)
 
 	assert.Equal(t, strings.Repeat("cat: nonexistent-file: No such file or directory\n", 2), stderr.String())
@@ -83,7 +83,7 @@ func TestAdmitDetach(t *testing.T) {
 	task := newTask(t, 2000*ms, "sleep", "1")
 
 	start := time.Now()
-	err := task.Run(task.ctx, 0)
+	err := task.Run(task.ctx)
 	assert.NoError(t, err)
 	assert.WithinDuration(t, start.Add(1000*ms), time.Now(), 50*ms)
 
@@ -96,10 +96,11 @@ func TestCancel(t *testing.T) {
 	t.Parallel()
 
 	task := newTask(t, 2000*ms, "sleep", "1")
+	task.StopGracePeriod = 100 * ms
 
 	start := time.Now()
 	in(500*ms, task.cancel)
-	err := task.Run(task.ctx, 100*ms)
+	err := task.Run(task.ctx)
 	assert.Equal(t, context.Canceled, err)
 	assert.WithinDuration(t, start.Add(500*ms), time.Now(), 20*ms)
 
@@ -119,7 +120,7 @@ func TestEnv(t *testing.T) {
 	task := newTask(t, 100*ms, "env")
 	task.Stdout = stdout
 	task.Stderr = stderr
-	err := task.Run(task.ctx, 0)
+	err := task.Run(task.ctx)
 	assert.NoError(t, err)
 	assert.Empty(t, stdout.String())
 	assert.Empty(t, stderr.String())
@@ -127,7 +128,7 @@ func TestEnv(t *testing.T) {
 	task.Env = map[string]string{"foo": "bar"}
 	stdout.Reset()
 	stderr.Reset()
-	err = task.Run(task.ctx, 0)
+	err = task.Run(task.ctx)
 	assert.NoError(t, err)
 	assert.Equal(t, "foo=bar\n", stdout.String())
 	assert.Empty(t, stderr.String())
@@ -139,12 +140,12 @@ func TestAlreadyRunning(t *testing.T) {
 	task := newTask(t, 1500*ms, "sleep", "1")
 
 	go func() {
-		err := task.Run(task.ctx, 0)
+		err := task.Run(task.ctx)
 		assert.NoError(t, err)
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	err := task.Run(task.ctx, 0)
+	err := task.Run(task.ctx)
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "already running")
 	}

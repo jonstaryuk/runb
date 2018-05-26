@@ -15,14 +15,15 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
-// A Task holds the parameters for running a binary.
+// A Task holds the parameters for running a binary. It must not be modified
+// while running.
 type Task struct {
 	Binary string            // Path to the binary
 	Args   []string          // Arguments
 	Env    map[string]string // Environment variables
-	Stdin  io.Reader         // Defaults to empty
-	Stdout io.Writer         // Defaults to this program's stdout
-	Stderr io.Writer         // Defaults to this program's stderr
+	Stdin  io.Reader         // Defaults to an empty reader
+	Stdout io.Writer         // Defaults to os.Stdout
+	Stderr io.Writer         // Defaults to os.Stderr
 
 	// Backoff will be consulted when restarting. The default is an
 	// exponential backoff capped at a maximum interval of 15 seconds with
@@ -30,6 +31,9 @@ type Task struct {
 	Backoff backoff.BackOff
 
 	RestartOnSuccess bool // Whether to restart if it exits with status code 0
+
+	// How long to wait after sending an interrupt, before killing the process.
+	StopGracePeriod time.Duration
 
 	EventLogger // Defaults to a new StderrEventLogger
 
@@ -69,13 +73,14 @@ func NewTask(binary string, args ...string) *Task {
 	return t
 }
 
-// Run runs the task, restarting if so specified. It must not be called if the
-// task is currently running.
+// Run runs the task, restarting if so specified. It blocks while the task is
+// running. A task cannot have multiple instances running concurrently; it is
+// an error to call Run while another call on the same task is still blocked.
 //
 // The running task can be stopped by canceling the provided context. The
 // process will first receive an interrupt signal. If it does not stop after
-// gracePeriod, it will be killed.
-func (t *Task) Run(ctx context.Context, gracePeriod time.Duration) error {
+// t.StopGracePeriod, it will be killed.
+func (t *Task) Run(ctx context.Context) error {
 	if !t.running.TryAcquire(1) {
 		return errors.New("task is already running")
 	}
@@ -100,7 +105,7 @@ func (t *Task) Run(ctx context.Context, gracePeriod time.Duration) error {
 				select {
 				case <-stopped:
 					return
-				case <-time.After(gracePeriod):
+				case <-time.After(t.StopGracePeriod):
 					t.cmd.Process.Kill()
 				}
 			case <-stopped:
