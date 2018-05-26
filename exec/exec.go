@@ -71,9 +71,9 @@ func NewTask(binary string, args ...string) *Task {
 // Run runs the Task, restarting if so specified. It blocks while the task is
 // running. It is safe to start multiple concurrent runs.
 //
-// The running task can be stopped by canceling the provided context. The
-// process will first receive an interrupt signal. If it does not stop after
-// t.StopGracePeriod, it will be killed.
+// The running task can be stopped by canceling the provided context. If the
+// process is running, it will first receive an interrupt signal; if it does
+// not stop after t.StopGracePeriod, it will be killed.
 func (t *Task) Run(ctx context.Context) error {
 	var start time.Time
 	err := backoff.Retry(func() error {
@@ -117,7 +117,7 @@ func (t *Task) Run(ctx context.Context) error {
 			}
 			return nil
 		}
-	}, t.Backoff)
+	}, backoff.WithContext(t.Backoff, ctx))
 
 	if permerr, ok := err.(*backoff.PermanentError); ok {
 		return permerr.Err
