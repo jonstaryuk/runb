@@ -86,7 +86,7 @@ func TestAdmitDetach(t *testing.T) {
 	start := time.Now()
 	err := task.Run(task.ctx)
 	assert.NoError(t, err)
-	assert.WithinDuration(t, start.Add(1000*ms), time.Now(), 50*ms)
+	assert.WithinDuration(t, start.Add(1000*ms), time.Now(), 100*ms)
 
 	assert.Len(t, task.events, 2)
 	assert.IsType(t, exec.Launched{}, task.events[0])
