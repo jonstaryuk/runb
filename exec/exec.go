@@ -8,11 +8,11 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"sync"
 	"time"
 
 	"github.com/cenkalti/backoff"
 	"github.com/pkg/errors"
+	"golang.org/x/sync/semaphore"
 )
 
 // A Task holds the parameters for running a binary.
@@ -33,7 +33,7 @@ type Task struct {
 
 	EventLogger // Defaults to a new StderrEventLogger
 
-	running sync.Mutex
+	running *semaphore.Weighted
 	cmd     *exec.Cmd
 }
 
@@ -64,23 +64,9 @@ func NewTask(binary string, args ...string) *Task {
 		t.Backoff = bo
 	}
 
+	t.running = semaphore.NewWeighted(1)
+
 	return t
-}
-
-func timeout(f func(), d time.Duration) (ok bool) {
-	done := make(chan struct{})
-
-	go func() {
-		f()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return true
-	case <-time.After(d):
-		return false
-	}
 }
 
 // Run runs the task, restarting if so specified. It must not be called if the
@@ -90,10 +76,10 @@ func timeout(f func(), d time.Duration) (ok bool) {
 // process will first receive an interrupt signal. If it does not stop after
 // gracePeriod, it will be killed.
 func (t *Task) Run(ctx context.Context, gracePeriod time.Duration) error {
-	if !timeout(func() { t.running.Lock() }, 100*time.Millisecond) {
-		return errors.New("Run() must not be called if the task is already running")
+	if !t.running.TryAcquire(1) {
+		return errors.New("task is already running")
 	}
-	defer t.running.Unlock()
+	defer t.running.Release(1)
 
 	var start time.Time
 	err := backoff.Retry(func() error {
