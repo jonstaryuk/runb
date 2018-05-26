@@ -2,21 +2,20 @@ package exec
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/cenkalti/backoff"
-	"github.com/google/uuid"
 	"github.com/pkg/errors"
 )
 
 // A Task holds the parameters for running a binary.
-//
-// It must not be modified after starting and must not be re-used after cancellation.
 type Task struct {
 	Binary string            // Path to the binary
 	Args   []string          // Arguments
@@ -25,31 +24,23 @@ type Task struct {
 	Stdout io.Writer         // Defaults to this program's stdout
 	Stderr io.Writer         // Defaults to this program's stderr
 
+	// Backoff will be consulted when restarting. The default is an
+	// exponential backoff capped at a maximum interval of 15 seconds with
+	// unlimited elapsed time.
+	Backoff backoff.BackOff
+
 	RestartOnSuccess bool // Whether to restart if it exits with status code 0
 
-	// Backoff will be consulted when restarting. The default is capped at a
-	// maximum interval of 15 seconds and never gives up.
-	Backoff *backoff.ExponentialBackOff
+	EventLogger // Defaults to a new StderrEventLogger
 
-	Log EventLogger // Defaults to a new StderrEventLogger
-
-	id    string
-	cmd   *exec.Cmd
-	start time.Time
-
-	discontinue chan struct{}
-	done        chan struct{}
+	running sync.Mutex
+	cmd     *exec.Cmd
 }
 
 func NewTask(binary string, args ...string) *Task {
 	t := &Task{
 		Binary: binary,
 		Args:   args,
-
-		id: uuid.New().String(),
-
-		discontinue: make(chan struct{}, 1),
-		done:        make(chan struct{}),
 	}
 
 	if t.Stdin == nil {
@@ -62,65 +53,96 @@ func NewTask(binary string, args ...string) *Task {
 		t.Stderr = os.Stderr
 	}
 
-	if t.Log == nil {
-		t.Log = StderrEventLogger{Prefix: "exec " + t.id}
+	if t.EventLogger == nil {
+		t.EventLogger = StderrEventLogger{Prefix: t.Binary}
+	}
+
+	if t.Backoff == nil {
+		bo := backoff.NewExponentialBackOff()
+		bo.MaxInterval = 15 * time.Second
+		bo.MaxElapsedTime = 0
+		t.Backoff = bo
 	}
 
 	return t
 }
 
-// Admit schedules the task to run.
-//
-// If it exits, and its status code indicated failure or t.RestartOnSuccess is
-// true, it will be restarted after an exponential backoff delay.
-//
-// If on first launch the process fails within the abort time, Admit returns
-// an Exited event. Otherwise, Admit returns an error encountered while
-// launching the process, or nil if the process continued running after the
-// abort period or exited successfully within the abort period. (i.e., Admit
-// will block for at most the duration of abort.)
-func (t Task) Admit(abort time.Duration) error {
-	if t.Backoff == nil {
-		t.Backoff = backoff.NewExponentialBackOff()
-		t.Backoff.MaxInterval = 15 * time.Second
-		t.Backoff.MaxElapsedTime = 0
-	}
+func timeout(f func(), d time.Duration) (ok bool) {
+	done := make(chan struct{})
 
-	endfast := make(chan error)
-	go backoff.Retry(func() error {
+	go func() {
+		f()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+// Run runs the task, restarting if so specified. It must not be called if the
+// task is currently running.
+//
+// The running task can be stopped by canceling the provided context. The
+// process will first receive an interrupt signal. If it does not stop after
+// gracePeriod, it will be killed.
+func (t *Task) Run(ctx context.Context, gracePeriod time.Duration) error {
+	if !timeout(func() { t.running.Lock() }, 100*time.Millisecond) {
+		return errors.New("Run() must not be called if the task is already running")
+	}
+	defer t.running.Unlock()
+
+	var start time.Time
+	err := backoff.Retry(func() error {
 		t.cmd = t.newCmd()
-		t.start = time.Now()
 
 		if err := t.cmd.Start(); err != nil {
-			t.Log.Log(LaunchFailed{error: err})
-			endfast <- err
-			return errors.New("") // retry
+			t.Log(LaunchFailed{error: err})
+			return errors.Wrap(err, "start process")
 		}
-		t.Log.Log(Launched{Process: t.cmd.Process})
+		start = time.Now()
+		t.Log(Launched{Process: t.cmd.Process})
 
+		stopped := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				t.cmd.Process.Signal(os.Interrupt)
+				select {
+				case <-stopped:
+					return
+				case <-time.After(gracePeriod):
+					t.cmd.Process.Kill()
+				}
+			case <-stopped:
+				return
+			}
+		}()
 		err := t.cmd.Wait()
-		event := Exited{Err: err, Runtime: time.Now().Sub(t.start)}
-		t.Log.Log(event)
-		endfast <- event
+		close(stopped)
+		t.Log(Exited{Err: err, Runtime: time.Now().Sub(start)})
 
 		select {
-		case <-t.discontinue:
-			t.done <- struct{}{}
-			return nil // cancelled, stop retrying
+		case <-ctx.Done():
+			return backoff.Permanent(ctx.Err())
 		default:
-			if err != nil || t.RestartOnSuccess {
-				return errors.New("") // retry
+			if err != nil {
+				return err
 			}
-			return nil // exited successfully, stop retrying
+			if t.RestartOnSuccess {
+				return errors.New("restarting on success")
+			}
+			return nil
 		}
 	}, t.Backoff)
 
-	select {
-	case err := <-endfast:
-		return err
-	case <-time.After(abort):
-		return nil
+	if permerr, ok := err.(*backoff.PermanentError); ok {
+		return permerr.Err
 	}
+	return err
 }
 
 func (t Task) newCmd() *exec.Cmd {
@@ -138,39 +160,8 @@ func (t Task) newCmd() *exec.Cmd {
 	return cmd
 }
 
-// Cancel stops and deschedules the task. It first sends SIGINT to the task,
-// if running. If it does not exit within the wait time, it is killed with
-// SIGKILL.
-func (t Task) Cancel(wait time.Duration) error {
-	select {
-	case <-t.done:
-		return nil
-	case t.discontinue <- struct{}{}:
-		break
-	default:
-		return errors.New("Cancel() already called on this Task")
-	}
-
-	if t.cmd != nil {
-		if err := t.cmd.Process.Signal(os.Interrupt); err != nil {
-			return err
-		}
-	}
-
-	select {
-	case <-t.done:
-		return nil
-	case <-time.After(wait):
-		if t.cmd != nil {
-			return t.cmd.Process.Kill()
-		} else {
-			return nil
-		}
-	}
-}
-
 type EventLogger interface {
-	Log(e Event) // Any given Task will only call Log sequentially
+	Log(e Event) // Any particular Task will only call Log sequentially
 }
 
 type Event interface {
@@ -181,9 +172,7 @@ type Launched struct {
 	Process *os.Process
 }
 
-func (Launched) String() string {
-	return "launched"
-}
+func (Launched) String() string { return "launched" }
 
 type LaunchFailed struct {
 	error
@@ -197,15 +186,11 @@ type Exited struct {
 }
 
 func (e Exited) String() string {
-	return fmt.Sprintf("process ended after %v: %s", e.Runtime.Round(time.Millisecond), e.Error())
-}
-
-func (e Exited) Error() string {
-	if e.Err == nil {
-		return "exited successfully"
-	} else {
-		return e.Err.Error()
+	msg := fmt.Sprintf("process ended after %v", e.Runtime.Round(time.Millisecond))
+	if e.Err != nil {
+		msg += ": " + e.Err.Error()
 	}
+	return msg
 }
 
 type StderrEventLogger struct {
@@ -215,3 +200,7 @@ type StderrEventLogger struct {
 func (s StderrEventLogger) Log(e Event) {
 	log.Printf("exec %s: %s", s.Prefix, e.String())
 }
+
+type NoopLogger struct{}
+
+func (NoopLogger) Log(e Event) {}
