@@ -1,3 +1,5 @@
+// Package exec provides a mechanism for running and automatically restarting
+// individual binaries.
 package exec
 
 import (
@@ -103,7 +105,7 @@ func (t *Task) Run(ctx context.Context) error {
 		}()
 		err := cmd.Wait()
 		close(stopped)
-		t.Log(Exited{Err: err, Runtime: time.Now().Sub(start)})
+		t.Log(Exited{Err: err, Runtime: time.Since(start)})
 
 		select {
 		case <-ctx.Done():
